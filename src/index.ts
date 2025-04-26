@@ -3,14 +3,10 @@ import { createServer } from "http";
 import { Server, Socket } from "socket.io";
 import cors from "cors";
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
-import dotenv from "dotenv";
+import { createNote } from "./DAO";
+import { handleClientCommand, handleServerCommand } from "./AI_interaction";
 
-import { craftPrompt } from "./promptHandling";
-
-dotenv.config();
-
+let myCache: Record<string, any> = {};
 const app = express();
 const httpServer = createServer(app);
 app.use(cors());
@@ -27,61 +23,126 @@ const port = 3001;
 io.on("connection", (socket: Socket) => {
   console.log(`conn: ${socket.id}`);
 
-  socket.on("client_command", async (data) => {
-    try {
-      // Initialize Google AI
-      const apiKey = process.env.GEMINI_API_KEY as string;
-      const genAI = new GoogleGenerativeAI(apiKey);
+  socket.on(
+    "client_command",
+    async (data: {
+      message: string;
+      isSystemMessage: boolean;
+    }): Promise<void> => {
+      try {
+        // Fetch note currently stored locally
+        const current_note = myCache[socket.id] as Note;
 
-      // Get the model with system instructions
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-pro-exp-03-25",
-        systemInstruction: SYSTEM_INSTRUCTIONS,
-      });
+        console.log(`current note: ${current_note}`);
 
-      // Setup generation config
-      const generationConfig = {
-        temperature: 1,
-        topP: 0.95,
-        topK: 64,
-        maxOutputTokens: 65536,
-        responseMimeType: "text/plain",
-      };
+        // Send user command and current note state to AI for analysis
+        const { response_message, action, new_note, tagIds, new_tags } =
+          await handleClientCommand(data.message, current_note);
 
-      // Start chat session
-      const chatSession = model.startChat({
-        generationConfig,
-        history: [], // You may want to maintain chat history
-      });
+        // Handle note based on action defined by AI
+        switch (action) {
+          // This action will add the current note state to the database,
+          // The transaction response will be given to the AI for response generation.
+          // If the transaction is successful an action termination message will be returned,
+          // Otherwise error handling will take over.
+          case "Create": {
+            // Database transaction is attempted
+            const { success, message } = await createNote(new_note, tagIds, new_tags);
 
-      // Format the user message with the craftPrompt function
-      const formattedPrompt = craftPrompt(data.message);
+            // Transaction result is given to AI which will generate an appropriate response.
+            const aiResponse = await handleServerCommand(success, message);
+            // TODO eventually note will only be deleted on successful creation
+            //  if (success) { // If the transaction was successful, a short message will notify the user.
+            //    delete myCache[socket.id];
+            //  } else { // If the transaction failed, a message will guide the user through error handling.
+            //    errorHandling();
+            //  }
 
-      // Send user command to AI
-      const result = await chatSession.sendMessage(formattedPrompt);
-      const resultText = result.response.text();
-      const aiResponse = resultText.substring(8, resultText.length - 3);
+            // For now cached note is deleted regardless.
+            delete myCache[socket.id];
 
-      // Parse AI response
-      const parsedResponse = JSON.parse(aiResponse);
+            // For now emit system response with database transaction message (assumes transaction is always successful)
+            socket.emit("system_response", {
+              message: aiResponse,
+              isSystemMessage: true,
+            });
+            break;
+          }
+          // TODO
+          //  This action will fetch a note using the filters provided.
+          case "Fetch": {
+            break;
+          }
+          // TODO
+          //  This action will delete a note given it's id.
+          case "Delete": {
+            break;
+          }
+          // This action assumes more data is needed to complete note
+          case undefined: {
+            // Cache current note
+            myCache[socket.id] = new_note;
 
-      // TODO: Implement source handling based on parsedResponse.source_handling
-      // For example: if(parsedResponse.source_handling === "handleYouTube") { ... }
+            // Send system response asking for more details
+            socket.emit("system_response", {
+              message: response_message,
+              isSystemMessage: true,
+            });
+            break;
+          }
+        }
+      } catch (error) {
+        // Default error handling
+        console.error("Error processing command:", error);
+        socket.emit("system_response", {
+          message: "Sorry, I couldn't process that command.",
+          isSystemMessage: true,
+        });
+      }
 
-      // Send AI response back to client
-      socket.emit("system_response", {
-        message: parsedResponse.response_message,
-        noteState: parsedResponse.current_note_state,
-        isSystemMessage: true,
-      });
-    } catch (error) {
-      console.error("Error processing command:", error);
-      socket.emit("system_response", {
-        message: "Sorry, I couldn't process that command.",
-        isSystemMessage: true,
-      });
-    }
-  });
+      // if (action === "Create") {
+      //   // Database transaction is attempted
+      //   const { success, message } = await createNote(new_note);
+      //
+      //   // Transaction result is given to AI which will generate an appropriate response.
+      //   const aiResponse = await handleServerCommand(success, message);
+      //   // TODO eventually note will only be deleted on successful creation
+      //   //  if (success) { // If the transaction was successful, a short message will notify the user.
+      //   //    delete myCache[socket.id];
+      //   //  } else { // If the transaction failed, a message will guide the user through error handling.
+      //   //    errorHandling();
+      //   //  }
+      //
+      //   // For now cached note is deleted regardless.
+      //   delete myCache[socket.id];
+      //
+      //   // For now emit system response with database transaction message (assumes transaction is always successful)
+      //   socket.emit("system_response", {
+      //     message: aiResponse,
+      //     isSystemMessage: true,
+      //   });
+      // }
+      //
+      // TODO
+      //  This action will fetch a note using the filters provided.
+      // else if (action === "Fetch") {
+      // }
+      //
+      // TODO
+      //  This action will delete a note given it's id.
+      // else if (action === "Delete") {
+      // }
+      //
+      // This action assumes more data is needed to complete note
+      // else if (action === undefined) {
+      //   // Send system response asking for more details
+      //   socket.emit("system_response", {
+      //     message: response_message,
+      //     isSystemMessage: true,
+      //   });
+      // }
+    },
+  );
 
   socket.on("disconnect", () => {
     console.log(`disc: ${socket.id}`);
