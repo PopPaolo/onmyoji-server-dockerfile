@@ -1,18 +1,30 @@
-export function craftPrompt(message: string): string {
-    const today = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
+import { getTags } from "./DAO";
 
-    const promptObject = {
-        "command_type": "user_command",
-        "command_string": message,
-        "existing_tags": [
-            "cooking", "travel", "finance", "gardening", "photography",
-            "technology", "cars", "fitness", "art", "history",
-            "music", "books", "programming", "pets", "sports",
-            "fashion", "movies", "design", "home", "organization", "minimalism"
-        ],
-        "current_note_state": null,
-        "date": today
-    };
+// Craft a user command prompt
+export async function craftUserPrompt(
+  message: string,
+  noteState?: Note,
+): Promise<string> {
+  // Fetch existing tags from the database
+  const tags = await getTags();
 
-    return JSON.stringify(promptObject);
+  const promptObject = {
+    command_type: "user_command",
+    command_string: message,
+    existing_tags: tags,
+    current_note: noteState,
+  };
+
+  return JSON.stringify(promptObject);
+}
+
+// Craft a server command prompt
+export function craftServerPrompt(success: boolean, message: string): string {
+  const promptObject = {
+    command_type: "server_command",
+    success: success,
+    message: message,
+  };
+
+  return JSON.stringify(promptObject);
 }
